@@ -1,102 +1,159 @@
 cmake_minimum_required(VERSION 3.22)
-
-# Root CMake for the Omnia SDK (HAL-agnostic drivers + Port/RTOS adapters)
 project(omnia C)
 
-# ---- Global compile settings -------------------------------------------------
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Options:
-# - OMNIA_PORT: selects the HAL adapter
-# - OMNIA_RTOS: selects the RTOS adapter (optional)
-option(OMNIA_PORT "HAL port adapter (msp430fr2xx|stm32h755|esp32)" "stm32h755")
-option(OMNIA_RTOS "RTOS adapter (none|freertos|zephyr)" "none")
+# ---------------- Opcions globals ----------------
+set(OMNIA_PORT "stm32h755" CACHE STRING "stm32h755")
+option(OMNIA_ENABLE_HM19       "Enable HM19 BLE driver" OFF)
+option(OMNIA_ENABLE_EMG_STREAM "Enable EMG stream layer" OFF)
+option(OMNIA_ENABLE_EMG_PACKET "Enable EMG packet protocol" ON)
+option(OMNIA_ENABLE_APPS       "Build Omnia apps" ON)
 
 message(STATUS "OMNIA_PORT = ${OMNIA_PORT}")
-message(STATUS "OMNIA_RTOS = ${OMNIA_RTOS}")
 
-# ---- Omnia Port (IO contract + optional RTOS ops) ----------------------------
-# Core: minimal registry & accessors
+# ---------------- Port core ----------------
 add_library(omnia_port STATIC
   core/omnia_port_default.c
 )
-target_include_directories(omnia_port
-  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
+target_include_directories(omnia_port PUBLIC include)
 
-# ---- HAL adapter selection ----------------------------------------------------
-# Each adapter must provide an omnia_port_vtable_t (IO) and an init() function
-if(OMNIA_PORT STREQUAL "msp430fr2xx")
-  target_sources(omnia_port PRIVATE ports/msp430fr2xx/port_msp430.c)
-  target_compile_definitions(omnia_port PUBLIC OMNIA_PORT_MSP430FR2XX=1)
-elseif(OMNIA_PORT STREQUAL "stm32h755")
-  target_sources(omnia_port PRIVATE ports/stm32h755/port_stm32.c)
+# ---------------- HAL port ----------------
+if(OMNIA_PORT STREQUAL "stm32h755")
+  target_sources(omnia_port PRIVATE ports/stm32h7/src/port_stm32.c)
+  target_include_directories(omnia_port PUBLIC ports/stm32h7/inc)
   target_compile_definitions(omnia_port PUBLIC OMNIA_PORT_STM32H755=1)
-  # target_link_libraries(omnia_port PUBLIC stm32hal)  # <-- link your STM32 HAL target here
-elseif(OMNIA_PORT STREQUAL "esp32")
-  target_sources(omnia_port PRIVATE ports/esp32/port_esp32.c)
-  target_compile_definitions(omnia_port PUBLIC OMNIA_PORT_ESP32=1)
-  # ESP-IDF typically manages its own build; adapt if integrating with idf.cmake.
 else()
-  message(FATAL_ERROR "Unknown OMNIA_PORT='${OMNIA_PORT}'. Use: msp430fr2xx|stm32h755|esp32")
+  message(FATAL_ERROR "Unsupported OMNIA_PORT=${OMNIA_PORT}")
 endif()
 
-# ---- RTOS adapter selection (optional) ---------------------------------------
-# RTOS adds extended ops (tasks, queues, timers, mutex, etc.) without touching drivers
-if(OMNIA_RTOS STREQUAL "none")
-  target_compile_definitions(omnia_port PUBLIC OMNIA_CAP_RTOS=0)
-elseif(OMNIA_RTOS STREQUAL "freertos")
-  target_sources(omnia_port PRIVATE
-    core/omnia_port_ex.c
-    ports/common/rtos_freertos.c
-  )
-  target_compile_definitions(omnia_port PUBLIC OMNIA_CAP_RTOS=1 OMNIA_RTOS_FREERTOS=1)
-  # Link your FreeRTOS kernel target here if available (example):
-  # target_link_libraries(omnia_port PUBLIC freertos_kernel)
-elseif(OMNIA_RTOS STREQUAL "zephyr")
-  target_sources(omnia_port PRIVATE
-    core/omnia_port_ex.c
-    ports/common/rtos_zephyr.c
-  )
-  target_compile_definitions(omnia_port PUBLIC OMNIA_CAP_RTOS=1 OMNIA_RTOS_ZEPHYR=1)
-  # Zephyr apps are usually built with zephyr.cmake; adjust to your integration.
-else()
-  message(FATAL_ERROR "Unknown OMNIA_RTOS='${OMNIA_RTOS}'. Use: none|freertos|zephyr")
-endif()
+# =================================================
+# Drivers
+# =================================================
 
-# ---- Drivers (HAL-agnostic) --------------------------------------------------
-# Example driver: ST7735 LCD. It only depends on the Omnia Port contract.
 add_library(st7735 STATIC
-  drivers/st7735/st7735.c
+  drivers/st7735/core/st7735.c
+  drivers/st7735/core/fonts.c
 )
-target_include_directories(st7735
-  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/st7735
+target_include_directories(st7735 PUBLIC
+  include
+  drivers/st7735/include
 )
 target_link_libraries(st7735 PUBLIC omnia_port)
 
-# ---- (Optional) warnings & sanity --------------------------------------------
-if (MSVC)
-  target_compile_options(omnia_port PRIVATE /W4)
-  target_compile_options(st7735    PRIVATE /W4)
-else()
-  target_compile_options(omnia_port PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(st7735    PRIVATE -Wall -Wextra -Wpedantic)
+add_library(sen0240 STATIC
+  drivers/sen0240/core/sen0240.c
+)
+target_include_directories(sen0240 PUBLIC
+  include
+  drivers/sen0240/include
+)
+target_link_libraries(sen0240 PUBLIC omnia_port)
+
+# ---------------- HM19 ----------------
+if(OMNIA_ENABLE_HM19)
+  add_library(hm19 STATIC
+    drivers/hm19/core/hm19.c
+  )
+  target_include_directories(hm19 PUBLIC
+    include
+    drivers/hm19/include
+  )
+  target_link_libraries(hm19 PUBLIC omnia_port)
 endif()
 
-# ---- (Optional) install rules ------------------------------------------------
-# install(TARGETS omnia_port st7735
-#   ARCHIVE DESTINATION lib
-#   LIBRARY DESTINATION lib
-#   RUNTIME DESTINATION bin)
-# install(DIRECTORY include/ DESTINATION include)
+# =================================================
+# Protocols
+# =================================================
 
-# ---- Usage notes -------------------------------------------------------------
-# Configure with:
-#   cmake -S . -B build -DOMNIA_PORT=stm32h755 -DOMNIA_RTOS=freertos
-# Build:
-#   cmake --build build --config Release
+if(OMNIA_ENABLE_EMG_PACKET)
+  add_library(emg_packet STATIC
+    protocols/emg_packet/core/emg_packet.c
+  )
+  target_include_directories(emg_packet PUBLIC
+    include
+    protocols/emg_packet/include
+  )
+endif()
+
+# =================================================
+# Streams
+# =================================================
+
+if(OMNIA_ENABLE_EMG_STREAM)
+  add_library(emg_stream STATIC
+    streams/emg_stream/core/emg_stream.c
+  )
+  target_include_directories(emg_stream PUBLIC
+    include
+    streams/emg_stream/include
+  )
+
+  target_link_libraries(emg_stream PUBLIC
+    omnia_port
+    emg_packet
+  )
+
+  # hm19 només si està activat i existeix el target
+  if(OMNIA_ENABLE_HM19)
+    target_link_libraries(emg_stream PUBLIC hm19)
+  endif()
+endif()
+
+# =================================================
+# Apps
+# =================================================
+
+if(OMNIA_ENABLE_APPS)
+  add_library(app_emg_plot STATIC
+    apps/emg_plot/core/app_emg.c
+    apps/emg_plot/core/app_plot.c
+    apps/emg_plot/core/app_emg_stream.c
+  )
+  target_include_directories(app_emg_plot PUBLIC
+    apps/emg_plot/include
+  )
+
+  target_link_libraries(app_emg_plot PUBLIC
+    st7735
+    sen0240
+    omnia_port
+    emg_packet
+    m              # <- aquí és on realment cal (sqrtf, fabsf, etc.)
+  )
+
+  if(OMNIA_ENABLE_EMG_STREAM)
+    target_link_libraries(app_emg_plot PUBLIC emg_stream)
+  endif()
+endif()
+
+# =================================================
+# Omnia all-in-one
+# =================================================
+add_library(omnia_all INTERFACE)
+
+target_link_libraries(omnia_all INTERFACE
+  omnia_port
+  st7735
+  sen0240
+)
+
+# Opcional: paraigua (no fa mal, però no confiïs només en això)
+target_link_libraries(omnia_all INTERFACE m)
+
+if(OMNIA_ENABLE_HM19)
+  target_link_libraries(omnia_all INTERFACE hm19)
+endif()
+
+if(OMNIA_ENABLE_EMG_PACKET)
+  target_link_libraries(omnia_all INTERFACE emg_packet)
+endif()
+
+if(OMNIA_ENABLE_EMG_STREAM)
+  target_link_libraries(omnia_all INTERFACE emg_stream)
+endif()
+
+if(OMNIA_ENABLE_APPS)
+  target_link_libraries(omnia_all INTERFACE app_emg_plot)
+endif()
