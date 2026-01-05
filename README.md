@@ -173,7 +173,7 @@ APIs may evolve, but the **core architectural principles are stable**.
 
 ## License
 
-Specify your license here (e.g. MIT, BSD, Apache-2.0).
+This project is licensed under the Apache License 2.0.
 
 ---
 
