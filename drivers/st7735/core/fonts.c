@@ -1,5 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+/*
+ * Copyright (c) 2025 Jan Borràs Ros
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * @file fonts.c
+ * @brief 5x7 bitmap font table for monochrome displays.
+ *
+ * This file provides a fixed-width bitmap font suitable for small
+ * monochrome or RGB displays (e.g. ST7735).
+ *
+ * Characteristics:
+ * - ASCII range: 0x20 (space) to 0x7F (DEL)
+ * - Glyph size: 5 columns × 7 rows
+ * - Storage: 5 bytes per glyph, one byte per column
+ *
+ * Bit layout:
+ * - Each byte represents a vertical column.
+ * - Bit 0 (LSB) is the top pixel.
+ * - Bit 6 is the bottom pixel.
+ * - Bit 7 is unused.
+ *
+ * Rendering code is expected to iterate over columns and test bits
+ * to draw pixels accordingly.
+ */
+
 #include "fonts.h"
 
+/**
+ * @brief 5x7 ASCII bitmap font table.
+ *
+ * Indexing:
+ * @code
+ * glyph = FONTS[ascii_code - 0x20]
+ * @endcode
+ *
+ * Each glyph consists of 5 bytes, representing vertical columns
+ * from left to right.
+ */
 const uint8_t FONTS[][5] = {
   { 0x00, 0x00, 0x00, 0x00, 0x00 }, // 20 space
   { 0x00, 0x00, 0x5f, 0x00, 0x00 }, // 21 !

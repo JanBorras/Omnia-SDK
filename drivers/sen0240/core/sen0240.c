@@ -1,245 +1,264 @@
-#include "sen0240.h"
-#include "omnia_port.h" // per omnia_port_has_adc()
+// SPDX-License-Identifier: Apache-2.0
+/*
+ * Copyright (c) 2025 Jan Borràs Ros
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 /**
- * @brief Inicialitza el context lògic del sensor EMG SEN0240.
+ * @file sen0240.c
+ * @brief SEN0240 EMG sensor logical driver (ADC-based).
  *
- * Aquesta funció NO configura el maquinari de l'ADC. Assumeix que:
- *   - L'ADC ja està inicialitzat i configurat (canal, sampling time, vref, etc.).
- *   - El handle omnia_adc_handle_t reflecteix correctament aquesta configuració.
+ * This module implements the logical handling of the SEN0240 EMG sensor.
+ * It does NOT configure or own the ADC hardware. Instead, it relies on
+ * a pre-configured @ref omnia_adc_handle_t provided by the platform.
  *
- * El que fa és:
- *   - Validar els punters d'entrada.
- *   - Comprovar que el port actual disposa de suport d'ADC.
- *   - Guardar una còpia del handle ADC i dels paràmetres de calibratge
- *     (offset i gain) dins de l'estructura sen0240_t.
+ * Responsibilities:
+ * - Validate ADC availability through the Omnia port contract.
+ * - Store calibration parameters (baseline offset and gain).
+ * - Provide raw, voltage, centered and normalized readings.
+ * - Support baseline calibration through multi-sample averaging.
+ */
+
+#include "sen0240.h"
+#include "omnia_port.h" /* for omnia_port_has_adc() */
+
+/* -------------------------------------------------------------------------- */
+/* Initialization                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @brief Initialize the SEN0240 sensor context.
  *
- * @param s          Punter a l'estructura del sensor (context intern).
- * @param adc        Punter a un handle ADC ja configurat (es copia per valor).
- * @param v_offset   Baseline en volts del SEN0240 (normalment ~1.5 V).
- * @param gain_volts Factor d'escala per normalitzar el senyal centrat
- *                   (per exemple, vref/2 o amplitud màxima esperada).
+ * This function does NOT configure the ADC hardware. It assumes:
+ * - The ADC is already initialized and configured (channel, sampling time, vref, etc.).
+ * - The provided @ref omnia_adc_handle_t accurately reflects that configuration.
  *
- * @return OMNIA_OK           si tot és correcte.
- *         OMNIA_EINVAL       si s o adc són NULL.
- *         OMNIA_EUNSUPPORTED si el port actual no anuncia suport d'ADC.
+ * The function:
+ * - Validates input pointers.
+ * - Checks that the active port exposes ADC support.
+ * - Copies the ADC handle and calibration parameters into the sensor context.
+ *
+ * @param s           Sensor context.
+ * @param adc         Pointer to a configured ADC handle (copied by value).
+ * @param v_offset    Baseline voltage in volts (typically ~1.5 V).
+ * @param gain_volts  Scaling factor used for signal normalization.
+ *
+ * @return OMNIA_OK            on success.
+ * @return OMNIA_EINVAL        if @p s or @p adc is NULL.
+ * @return OMNIA_ENOTSUP       if the active port does not provide ADC support.
  */
 omnia_status_t sen0240_init(sen0240_t* s,
                             const omnia_adc_handle_t* adc,
                             float v_offset,
                             float gain_volts)
 {
-  // Validació bàsica de punters d’entrada
-  if (!s || !adc) {
-    return OMNIA_EINVAL;
-  }
+    if (!s || !adc) {
+        return OMNIA_EINVAL;
+    }
 
-  // Comprovem que el port actual declara suport d'ADC.
-  // Això garanteix que hi ha una implementació de adc_read al vtable.
-  if (!omnia_port_has_adc()) {
-    return OMNIA_ENOTSUP;
-  }
+    /* Ensure the active port declares ADC support. */
+    if (!omnia_port_has_adc()) {
+        return OMNIA_ENOTSUP;
+    }
 
-  // Guardem una còpia del handle ADC (per valor, per independitzar-nos
-  // de la vida del paràmetre extern).
-  s->adc = *adc;
+    /* Copy ADC handle by value to decouple from caller lifetime. */
+    s->adc = *adc;
 
-  // Guardem la baseline (offset) en volts. Aquest valor es farà servir
-  // per centrar el senyal al voltant de 0 V.
-  s->v_offset = v_offset;
+    /* Store baseline offset (volts). */
+    s->v_offset = v_offset;
 
-  // Guardem el factor d'escala. Si el caller passa un valor no vàlid,
-  // fem servir 1.0f per evitar divisions per zero.
-  s->gain_volts = (gain_volts > 0.0f) ? gain_volts : 1.0f;
+    /* Store gain factor, guarding against invalid values. */
+    s->gain_volts = (gain_volts > 0.0f) ? gain_volts : 1.0f;
 
-  return OMNIA_OK;
+    return OMNIA_OK;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Raw and voltage readings                                                   */
+/* -------------------------------------------------------------------------- */
+
 /**
- * @brief Llegeix una mostra crua (RAW) del SEN0240 via ADC.
+ * @brief Read a raw ADC sample from the SEN0240.
  *
- * Aquesta funció no aplica cap calibratge ni conversió a volts. Simplement:
- *   - Demana al backend d'ADC una mostra.
- *   - Retorna el valor de conteig (p.ex. 0..4095 per 12 bits).
+ * No calibration or conversion is applied. The returned value is the
+ * direct ADC code (e.g. 0..4095 for a 12-bit ADC).
  *
- * @param s        Punter al context del sensor.
- * @param out_raw  Punter on es desarà el valor cru de l'ADC.
+ * @param s        Sensor context.
+ * @param out_raw  Output raw ADC value.
  *
- * @return OMNIA_OK     si la lectura és correcta.
- *         OMNIA_EINVAL si s o out_raw són NULL.
- *         Altres codis d'error provinents de omnia_adc_read_raw().
+ * @return OMNIA_OK      on success.
+ * @return OMNIA_EINVAL  if @p s or @p out_raw is NULL.
+ * @return Other error codes propagated from the ADC backend.
  */
 omnia_status_t sen0240_read_raw(sen0240_t* s, uint16_t* out_raw)
 {
-  if (!s || !out_raw) {
-    return OMNIA_EINVAL;
-  }
+    if (!s || !out_raw) {
+        return OMNIA_EINVAL;
+    }
 
-  // Deleguem la lectura crua a l'helper genèric d'ADC del SDK.
-  return omnia_adc_read_raw(&s->adc, out_raw);
+    return omnia_adc_read_raw(&s->adc, out_raw);
 }
 
 /**
- * @brief Llegeix una mostra en volts absoluts (respecte vref).
+ * @brief Read a voltage sample from the SEN0240.
  *
- * Aquesta funció:
- *   - Llegeix una mostra RAW de l'ADC.
- *   - Converteix el valor de conteig a volts utilitzant la resolució i vref
- *     emmagatzemades a omnia_adc_handle_t.
+ * The returned value is the absolute voltage measured at the ADC pin,
+ * referenced to the ADC vref. No baseline subtraction is applied.
  *
- * No treu l'offset del SEN0240: és la tensió "tal qual" mesurada al pin.
+ * @param s          Sensor context.
+ * @param out_volts  Output voltage in volts.
  *
- * @param s          Punter al context del sensor.
- * @param out_volts  Punter on es desarà la tensió en volts.
- *
- * @return OMNIA_OK     si la lectura i conversió són correctes.
- *         OMNIA_EINVAL si s o out_volts són NULL.
- *         Altres codis d'error provinents de omnia_adc_read_volts().
+ * @return OMNIA_OK      on success.
+ * @return OMNIA_EINVAL  if @p s or @p out_volts is NULL.
+ * @return Other error codes propagated from the ADC backend.
  */
 omnia_status_t sen0240_read_volts(sen0240_t* s, float* out_volts)
 {
-  if (!s || !out_volts) {
-    return OMNIA_EINVAL;
-  }
+    if (!s || !out_volts) {
+        return OMNIA_EINVAL;
+    }
 
-  // Fem servir directament l'helper que llegeix RAW i converteix a volts.
-  return omnia_adc_read_volts(&s->adc, out_volts);
+    return omnia_adc_read_volts(&s->adc, out_volts);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Centered and normalized readings                                           */
+/* -------------------------------------------------------------------------- */
+
 /**
- * @brief Llegeix una mostra centrada respecte la baseline del SEN0240.
+ * @brief Read a baseline-centered voltage sample.
  *
- * Flux:
- *   1. Llegeix una mostra en volts absoluts.
- *   2. Resta la baseline (v_offset) configurada a sen0240_init().
+ * Flow:
+ * 1. Read absolute voltage from the ADC.
+ * 2. Subtract the configured baseline offset.
  *
- * Exemple:
- *   - v_offset = 1.5 V
- *   - mesura = 1.55 V
- *   - out_centered = +0.05 V
+ * Example:
+ * - v_offset = 1.5 V
+ * - measured = 1.55 V
+ * - centered = +0.05 V
  *
- * Això prepara el senyal per tractar l'EMG com una amplitud al voltant de 0 V.
+ * @param s              Sensor context.
+ * @param out_centered   Output centered voltage (volts).
  *
- * @param s             Punter al context del sensor.
- * @param out_centered  Punter on es desarà el valor centrat en volts.
- *
- * @return OMNIA_OK     si tot és correcte.
- *         OMNIA_EINVAL si s o out_centered són NULL.
- *         Altres codis d'error si la lectura ADC falla.
+ * @return OMNIA_OK      on success.
+ * @return OMNIA_EINVAL  if @p s or @p out_centered is NULL.
+ * @return Other error codes if ADC reading fails.
  */
 omnia_status_t sen0240_read_centered(sen0240_t* s, float* out_centered)
 {
-  if (!s || !out_centered) {
-    return OMNIA_EINVAL;
-  }
+    if (!s || !out_centered) {
+        return OMNIA_EINVAL;
+    }
 
-  float v = 0.0f;
+    float v = 0.0f;
 
-  // Primer, obtenim la tensió absoluta via l'ADC.
-  omnia_status_t st = omnia_adc_read_volts(&s->adc, &v);
-  if (st != OMNIA_OK) {
-    return st;
-  }
+    omnia_status_t st = omnia_adc_read_volts(&s->adc, &v);
+    if (st != OMNIA_OK) {
+        return st;
+    }
 
-  // Després, centrem el senyal restant la baseline configurada.
-  *out_centered = v - s->v_offset;
-  return OMNIA_OK;
+    *out_centered = v - s->v_offset;
+    return OMNIA_OK;
 }
 
 /**
- * @brief Llegeix una mostra centrada i normalitzada.
+ * @brief Read a centered and normalized sample.
  *
- * Aquesta funció combina:
- *   - La centrada del senyal (treure v_offset).
- *   - Una normalització per un factor gain_volts.
+ * Computation:
+ * @code
+ * norm = (v - v_offset) / gain_volts
+ * @endcode
  *
- * centered_norm = (v - v_offset) / gain_volts
+ * This representation is convenient for ML pipelines, typically producing
+ * values in the approximate range [-1, +1].
  *
- * Útil per preparar dades per a models de ML:
- *   - Si gain_volts = vref/2, el rang esperat queda aproximadament dins [-1, +1].
+ * @param s        Sensor context.
+ * @param out_norm Output centered and normalized value.
  *
- * @param s        Punter al context del sensor.
- * @param out_norm Punter on es desarà el valor centrat i normalitzat.
- *
- * @return OMNIA_OK     si tot és correcte.
- *         OMNIA_EINVAL si s o out_norm són NULL.
- *         Altres codis d'error si la lectura ADC o la centrada fallen.
+ * @return OMNIA_OK      on success.
+ * @return OMNIA_EINVAL  if @p s or @p out_norm is NULL.
+ * @return Other error codes if ADC reading fails.
  */
 omnia_status_t sen0240_read_centered_norm(sen0240_t* s, float* out_norm)
 {
-  if (!s || !out_norm) {
-    return OMNIA_EINVAL;
-  }
+    if (!s || !out_norm) {
+        return OMNIA_EINVAL;
+    }
 
-  float centered = 0.0f;
+    float centered = 0.0f;
 
-  // Reutilitzem la funció que ja fa la lectura en volts i la resta d'offset.
-  omnia_status_t st = sen0240_read_centered(s, &centered);
-  if (st != OMNIA_OK) {
-    return st;
-  }
+    omnia_status_t st = sen0240_read_centered(s, &centered);
+    if (st != OMNIA_OK) {
+        return st;
+    }
 
-  // Normalització pel gain configurat a l'init. Evitem divisió per zero
-  // gràcies a la protecció a sen0240_init (gain_volts >= 1.0f).
-  *out_norm = centered / s->gain_volts;
-  return OMNIA_OK;
+    *out_norm = centered / s->gain_volts;
+    return OMNIA_OK;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Baseline calibration                                                       */
+/* -------------------------------------------------------------------------- */
+
 /**
- * @brief Calibra la baseline del SEN0240 fent múltiples lectures.
+ * @brief Calibrate the baseline offset by averaging multiple samples.
  *
- * Aquesta funció llegeix n_samples mostres consecutives de l'ADC
- * amb un delay_ms entre cada lectura, i calcula la mitjana per
- * establir una nova baseline (v_offset).
+ * The function reads @p n_samples consecutive voltage samples, optionally
+ * waiting @p delay_ms milliseconds between each read, and computes their
+ * mean to establish a new baseline offset.
  *
- * Útil per ajustar la baseline a les condicions reals d'ús
- * (sense activitat muscular) després de la inicialització.
+ * This is typically executed while the muscle is at rest.
  *
- * @param s          Punter al context del sensor.
- * @param n_samples  Nombre de mostres a llegir per a la calibració.
- * @param delay_ms   Delay en mil·lisegons entre cada lectura (0 per cap delay).
+ * @param s           Sensor context.
+ * @param n_samples   Number of samples to average.
+ * @param delay_ms    Delay in milliseconds between samples (0 for none).
  *
- * @return OMNIA_OK           si la calibració és correcta.
- *         OMNIA_EINVAL       si s és NULL o n_samples és 0.
- *         OMNIA_ENOTSUP      si el port actual no implementa delay_us().
- *         Altres codis d'error si alguna lectura ADC falla.
+ * @return OMNIA_OK      on success.
+ * @return OMNIA_EINVAL  if @p s is NULL or @p n_samples is zero.
+ * @return OMNIA_ENOTSUP if the active port does not provide delay_us().
+ * @return Other error codes if ADC reading fails.
  */
 omnia_status_t sen0240_calibrate_baseline(sen0240_t* s,
                                           uint32_t n_samples,
                                           uint32_t delay_ms)
 {
-  if (!s || n_samples == 0U) {
-    return OMNIA_EINVAL;
-  }
-
-  // Obtenim el port actual per fer servir delay_us()
-  omnia_port_t* port = omnia_port_get();
-  if (!port || !port->v || !port->v->delay_us) {
-    // El port actual no implementa timing de microsegons
-    return OMNIA_ENOTSUP;
-  }
-
-  float acc = 0.0f;
-
-  for (uint32_t i = 0; i < n_samples; ++i) {
-    float v = 0.0f;
-
-    // Fem servir la pròpia API del driver per llegir volts absoluts
-    omnia_status_t st = sen0240_read_volts(s, &v);
-    if (st != OMNIA_OK) {
-      return st;  // Propaguen l'error d'ADC o del port
+    if (!s || n_samples == 0U) {
+        return OMNIA_EINVAL;
     }
 
-    acc += v;
-
-    // Delay entre mostres, si s'ha demanat
-    if (delay_ms > 0U) {
-      port->v->delay_us(delay_ms * 1000U);
+    omnia_port_t* port = omnia_port_get();
+    if (!port || !port->v || !port->v->delay_us) {
+        return OMNIA_ENOTSUP;
     }
-  }
 
-  // Mitjana de la tensió observada en repòs -> nova línia base
-  s->v_offset = acc / (float)n_samples;
+    float acc = 0.0f;
 
-  return OMNIA_OK;
+    for (uint32_t i = 0; i < n_samples; ++i) {
+        float v = 0.0f;
+
+        omnia_status_t st = sen0240_read_volts(s, &v);
+        if (st != OMNIA_OK) {
+            return st;
+        }
+
+        acc += v;
+
+        if (delay_ms > 0U) {
+            port->v->delay_us(delay_ms * 1000U);
+        }
+    }
+
+    s->v_offset = acc / (float)n_samples;
+    return OMNIA_OK;
 }
